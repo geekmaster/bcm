@@ -28,25 +28,34 @@ const char magic[]="BCM1";
 FILE* in;
 FILE* out;
 
-class Encoder
+struct Encoder
 {
-public:
 	uint code;
 	uint low;
 	uint high;
 
 	Encoder()
-		: code(0), low(0), high(-1)
-	{}
-
-	void Encode(int bit, uint p)
 	{
-		const uint mid=low+((ulonglong(high-low)*(p<<14))>>32);
+		code=0;
+		low=0;
+		high=uint(-1);
+	}
 
-		if (bit)
-			high=mid;
-		else
-			low=mid+1;
+	void EncodeBit0(uint p)
+	{
+		low+=((ulonglong(high-low)*(p<<14))>>32)+1;
+
+		while ((low^high)<(1<<24))
+		{
+			putc(low>>24, out);
+			low<<=8;
+			high=(high<<8)|255;
+		}
+	}
+
+	void EncodeBit1(uint p)
+	{
+		high=low+((ulonglong(high-low)*(p<<14))>>32);
 
 		while ((low^high)<(1<<24))
 		{
@@ -93,27 +102,28 @@ public:
 };
 
 template<int RATE>
-class Counter
+struct Counter
 {
-public:
 	int p;
 
 	Counter()
-		: p(1<<15)
-	{}
-
-	void Update(int bit)
 	{
-		if (bit)
-			p+=(p^65535)>>RATE;
-		else
-			p-=p>>RATE;
+		p=1<<15;
+	}
+
+	void UpdateBit0()
+	{
+		p-=p>>RATE;
+	}
+
+	void UpdateBit1()
+	{
+		p+=(p^65535)>>RATE;
 	}
 };
 
-class CM: public Encoder
+struct CM: Encoder
 {
-public:
 	Counter<2> counter0[256];
 	Counter<4> counter1[256][256];
 	Counter<6> counter2[2][256][17];
@@ -122,8 +132,11 @@ public:
 	int run;
 
 	CM()
-		: c1(0), c2(0), run(0)
 	{
+		c1=0;
+		c2=0;
+		run=0;
+		
 		for (int i=0; i<2; ++i)
 		{
 			for (int j=0; j<256; ++j)
@@ -134,7 +147,7 @@ public:
 		}
 	}
 
-	void Put(int c)
+	void Encode(int c)
 	{
 		if (c1==c2)
 			++run;
@@ -155,23 +168,34 @@ public:
 			const int x2=counter2[f][ctx][idx+1].p;
 			const int ssep=x1+(((x2-x1)*(p&4095))>>12);
 
-			const int bit=((c&128)!=0);
+			const int bit=c&128;
 			c+=c;
-			Encoder::Encode(bit, p+ssep+ssep+ssep);
 
-			counter0[ctx].Update(bit);
-			counter1[c1][ctx].Update(bit);
-			counter2[f][ctx][idx].Update(bit);
-			counter2[f][ctx][idx+1].Update(bit);
-
-			ctx+=ctx+bit;
+			if (bit)
+			{
+				Encoder::EncodeBit1(p+ssep+ssep+ssep);
+				counter0[ctx].UpdateBit1();
+				counter1[c1][ctx].UpdateBit1();
+				counter2[f][ctx][idx].UpdateBit1();
+				counter2[f][ctx][idx+1].UpdateBit1();
+				ctx+=ctx+1;
+			}
+			else
+			{
+				Encoder::EncodeBit0(p+ssep+ssep+ssep);
+				counter0[ctx].UpdateBit0();
+				counter1[c1][ctx].UpdateBit0();
+				counter2[f][ctx][idx].UpdateBit0();
+				counter2[f][ctx][idx+1].UpdateBit0();
+				ctx+=ctx;
+			}
 		}
 
 		c2=c1;
-		c1=byte(ctx);
+		c1=ctx&255;
 	}
 
-	int Get()
+	int Decode()
 	{
 		if (c1==c2)
 			++run;
@@ -194,16 +218,26 @@ public:
 
 			const int bit=Encoder::Decode(p+ssep+ssep+ssep);
 
-			counter0[ctx].Update(bit);
-			counter1[c1][ctx].Update(bit);
-			counter2[f][ctx][idx].Update(bit);
-			counter2[f][ctx][idx+1].Update(bit);
-
-			ctx+=ctx+bit;
+			if (bit)
+			{
+				counter0[ctx].UpdateBit1();
+				counter1[c1][ctx].UpdateBit1();
+				counter2[f][ctx][idx].UpdateBit1();
+				counter2[f][ctx][idx+1].UpdateBit1();
+				ctx+=ctx+1;
+			}
+			else
+			{
+				counter0[ctx].UpdateBit0();
+				counter1[c1][ctx].UpdateBit0();
+				counter2[f][ctx][idx].UpdateBit0();
+				counter2[f][ctx][idx+1].UpdateBit0();
+				ctx+=ctx;
+			}
 		}
 
 		c2=c1;
-		return c1=byte(ctx);
+		return c1=ctx&255;
 	}
 } cm;
 
@@ -211,15 +245,15 @@ byte* buf;
 
 void compress(int b)
 {
-	if (_fseeki64(in, 0, SEEK_END)!=0)
+	if (_fseeki64(in, 0, SEEK_END))
 	{
-		perror("Fseek failed");
+		perror("Fseek() failed");
 		exit(1);
 	}
 	const long long flen=_ftelli64(in);
 	if (flen<0)
 	{
-		perror("Ftell failed");
+		perror("Ftell() failed");
 		exit(1);
 	}
 	if (b>flen)
@@ -244,37 +278,37 @@ void compress(int b)
 		const int p=divbwt(buf, buf, (int*)&buf[b], n);
 		if (p<1)
 		{
-			perror("Divbwt failed");
+			perror("Divbwt() failed");
 			exit(1);
 		}
 
-		cm.Put(n>>24);
-		cm.Put(n>>16);
-		cm.Put(n>>8);
-		cm.Put(n);
-		cm.Put(p>>24);
-		cm.Put(p>>16);
-		cm.Put(p>>8);
-		cm.Put(p);
+		cm.Encode(n>>24);
+		cm.Encode(n>>16);
+		cm.Encode(n>>8);
+		cm.Encode(n);
+		cm.Encode(p>>24);
+		cm.Encode(p>>16);
+		cm.Encode(p>>8);
+		cm.Encode(p);
 
 		for (int i=0; i<n; ++i)
-			cm.Put(buf[i]);
+			cm.Encode(buf[i]);
 	}
 
-	cm.Put(0); // EOF
-	cm.Put(0);
-	cm.Put(0);
-	cm.Put(0);
+	cm.Encode(0); // EOF
+	cm.Encode(0);
+	cm.Encode(0);
+	cm.Encode(0);
 
 	cm.Flush();
 }
 
 void decompress()
 {
-	if ((getc(in)!=magic[0])
-		||(getc(in)!=magic[1])
-		||(getc(in)!=magic[2])
-		||(getc(in)!=magic[3]))
+	if (getc(in)!=magic[0]
+		|| getc(in)!=magic[1]
+		|| getc(in)!=magic[2]
+		|| getc(in)!=magic[3])
 	{
 		fprintf(stderr, "Not in BCM format\n");
 		exit(1);
@@ -286,13 +320,13 @@ void decompress()
 
 	for (;;)
 	{
-		const int n=(cm.Get()<<24)
-			|(cm.Get()<<16)
-			|(cm.Get()<<8)
-			|cm.Get();
-		if (n==0)
+		const int n=(cm.Decode()<<24)
+			|(cm.Decode()<<16)
+			|(cm.Decode()<<8)
+			|cm.Decode();
+		if (!n) // EOF
 			break;
-		if (b==0)
+		if (!b)
 		{
 			buf=(byte*)calloc(b=n, 5);
 			if (!buf)
@@ -301,11 +335,11 @@ void decompress()
 				exit(1);
 			}
 		}
-		const int p=(cm.Get()<<24)
-			|(cm.Get()<<16)
-			|(cm.Get()<<8)
-			|cm.Get();
-		if ((n<1)||(n>b)||(p<1)||(p>n))
+		const int p=(cm.Decode()<<24)
+			|(cm.Decode()<<16)
+			|(cm.Decode()<<8)
+			|cm.Decode();
+		if (n<1 || n>b || p<1 || p>n)
 		{
 			fprintf(stderr, "File corrupted\n");
 			exit(1);
@@ -313,13 +347,13 @@ void decompress()
 		// Inverse BWT
 		int t[257]={0};
 		for (int i=0; i<n; ++i)
-			++t[(buf[i]=cm.Get())+1];
+			++t[(buf[i]=cm.Decode())+1];
 		for (int i=1; i<256; ++i)
 			t[i]+=t[i-1];
 		int* next=(int*)&buf[b];
 		for (int i=0; i<n; ++i)
 			next[t[buf[i]]++]=i+(i>=p);
-		for (int i=p; i!=0;)
+		for (int i=p; i;)
 		{
 			i=next[i-1];
 			putc(buf[i-(i>=p)], out);
@@ -327,7 +361,7 @@ void decompress()
 	}
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char** argv)
 {
 	const clock_t start=clock();
 
@@ -335,7 +369,7 @@ int main(int argc, char* argv[])
 	bool do_decomp=false;
 	bool overwrite=false;
 
-	while ((argc>1)&&(argv[1][0]=='-'))
+	while (argc>1 && *argv[1]=='-')
 	{
 		switch (argv[1][1])
 		{
@@ -365,14 +399,14 @@ int main(int argc, char* argv[])
 	if (argc<2)
 	{
 		fprintf(stderr,
-			"BCM - A BWT-based file compressor, v1.00\n"
+			"BCM - A BWT-based file compressor, v1.01\n"
 			"\n"
 			"Usage: BCM [options] infile [outfile]\n"
 			"\n"
 			"Options:\n"
-			"  -b<N>[k] Set block size to N MB or KB (default is 20 MB)\n"
-			"  -d       Decompress\n"
-			"  -f       Force overwrite of output file\n");
+			"  -b#[k] Set block size to # MB or KB (default is 20 MB)\n"
+			"  -d     Decompress\n"
+			"  -f     Force overwrite of output file\n");
 		exit(1);
 	}
 
@@ -390,7 +424,7 @@ int main(int argc, char* argv[])
 		if (do_decomp)
 		{
 			const int p=strlen(ofname)-4;
-			if ((p>0)&&(strcmp(&ofname[p], ".bcm")==0))
+			if (p>0 && !strcmp(&ofname[p], ".bcm"))
 				ofname[p]='\0';
 			else
 				strcat(ofname, ".out");
@@ -419,16 +453,15 @@ int main(int argc, char* argv[])
 		exit(1);
 	}
 
-	fprintf(stdout, "%s: ", argv[1]);
-	fflush(stdout);
+	fprintf(stderr, "%s: ", argv[1]);
+	fflush(stderr);
 
 	if (do_decomp)
 		decompress();
 	else
 		compress(block_size);
 
-	fprintf(stdout, "%lld -> %lld in %.3fs\n",
-		_ftelli64(in), _ftelli64(out),
+	fprintf(stderr, "%lld->%lld in %.3fs\n", _ftelli64(in), _ftelli64(out),
 		double(clock()-start)/CLOCKS_PER_SEC);
 
 	fclose(in);
