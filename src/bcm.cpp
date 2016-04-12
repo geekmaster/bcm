@@ -43,8 +43,11 @@ struct Encoder
 
 	void EncodeBit0(uint p)
 	{
+#ifdef _WIN64
+		low+=((ulonglong(high-low)*p)>>18)+1;
+#else
 		low+=((ulonglong(high-low)*(p<<14))>>32)+1;
-
+#endif
 		while ((low^high)<(1<<24))
 		{
 			putc(low>>24, out);
@@ -55,8 +58,11 @@ struct Encoder
 
 	void EncodeBit1(uint p)
 	{
+#ifdef _WIN64
+		high=low+((ulonglong(high-low)*p)>>18);
+#else
 		high=low+((ulonglong(high-low)*(p<<14))>>32);
-
+#endif
 		while ((low^high)<(1<<24))
 		{
 			putc(low>>24, out);
@@ -80,10 +86,13 @@ struct Encoder
 			code=(code<<8)|getc(in);
 	}
 
-	int Decode(uint p)
+	int DecodeBit(uint p)
 	{
+#ifdef _WIN64
+		const uint mid=low+((ulonglong(high-low)*p)>>18);
+#else
 		const uint mid=low+((ulonglong(high-low)*(p<<14))>>32);
-
+#endif
 		const int bit=(code<=mid);
 		if (bit)
 			high=mid;
@@ -216,7 +225,7 @@ struct CM: Encoder
 			const int x2=counter2[f][ctx][idx+1].p;
 			const int ssep=x1+(((x2-x1)*(p&4095))>>12);
 
-			const int bit=Encoder::Decode(p+ssep+ssep+ssep);
+			const int bit=Encoder::DecodeBit(p+ssep+ssep+ssep);
 
 			if (bit)
 			{
@@ -378,7 +387,7 @@ int main(int argc, char** argv)
 				<<(argv[1][strlen(argv[1])-1]=='k'?10:20);
 			if (block_size<1)
 			{
-				fprintf(stderr, "Invalid block size\n");
+				fprintf(stderr, "Block size is out of range\n");
 				exit(1);
 			}
 			break;
@@ -399,7 +408,7 @@ int main(int argc, char** argv)
 	if (argc<2)
 	{
 		fprintf(stderr,
-			"BCM - A BWT-based file compressor, v1.01\n"
+			"BCM - A BWT-based file compressor, v1.02\n"
 			"\n"
 			"Usage: BCM [options] infile [outfile]\n"
 			"\n"
@@ -434,6 +443,13 @@ int main(int argc, char** argv)
 	}
 	else
 		strcpy(ofname, argv[2]);
+
+	if (!strcmp(ofname, argv[1]))
+	{
+		fprintf(stderr, "%s: Cannot %scompress onto itself\n", argv[1],
+			do_decomp?"de":"");
+		exit(1);
+	}
 
 	if (!overwrite)
 	{
