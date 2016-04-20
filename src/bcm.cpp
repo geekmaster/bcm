@@ -32,9 +32,10 @@ Written and placed in the public domain by Ilya Muravyov
 #include <time.h>
 #include "divsufsort.h" // libdivsufsort-lite
 
-typedef unsigned char byte;
-typedef unsigned int uint;
-typedef unsigned long long ulonglong;
+typedef unsigned char BYTE;
+typedef unsigned short WORD;
+typedef unsigned int DWORD;
+typedef unsigned long long QWORD;
 
 const char magic[]="BCM1";
 
@@ -43,44 +44,44 @@ FILE* out;
 
 struct Encoder
 {
-	uint code;
-	uint low;
-	uint high;
+	DWORD low;
+	DWORD high;
+	DWORD code;
 
 	Encoder()
 	{
-		code=0;
 		low=0;
-		high=uint(-1);
+		high=DWORD(-1);
+		code=0;
 	}
 
-	void EncodeBit0(uint p)
+	void EncodeBit0(DWORD p)
 	{
 #ifdef _WIN64
-		low+=((ulonglong(high-low)*p)>>18)+1;
+		low+=((QWORD(high-low)*p)>>18)+1;
 #else
-		low+=((ulonglong(high-low)*(p<<14))>>32)+1;
+		low+=((QWORD(high-low)*(p<<(32-18)))>>32)+1;
 #endif
 		while ((low^high)<(1<<24))
 		{
 			putc(low>>24, out);
 			low<<=8;
-			high=(high<<8)|255;
+			high=(high<<8)+255;
 		}
 	}
 
-	void EncodeBit1(uint p)
+	void EncodeBit1(DWORD p)
 	{
 #ifdef _WIN64
-		high=low+((ulonglong(high-low)*p)>>18);
+		high=low+((QWORD(high-low)*p)>>18);
 #else
-		high=low+((ulonglong(high-low)*(p<<14))>>32);
+		high=low+((QWORD(high-low)*(p<<(32-18)))>>32);
 #endif
 		while ((low^high)<(1<<24))
 		{
 			putc(low>>24, out);
 			low<<=8;
-			high=(high<<8)|255;
+			high=(high<<8)+255;
 		}
 	}
 
@@ -96,15 +97,15 @@ struct Encoder
 	void Init()
 	{
 		for (int i=0; i<4; ++i)
-			code=(code<<8)|getc(in);
+			code=(code<<8)+getc(in);
 	}
 
-	int DecodeBit(uint p)
+	int DecodeBit(DWORD p)
 	{
 #ifdef _WIN64
-		const uint mid=low+((ulonglong(high-low)*p)>>18);
+		const DWORD mid=low+((QWORD(high-low)*p)>>18);
 #else
-		const uint mid=low+((ulonglong(high-low)*(p<<14))>>32);
+		const DWORD mid=low+((QWORD(high-low)*(p<<(32-18)))>>32);
 #endif
 		const int bit=(code<=mid);
 		if (bit)
@@ -114,19 +115,19 @@ struct Encoder
 
 		while ((low^high)<(1<<24))
 		{
-			code=(code<<8)|getc(in);
 			low<<=8;
-			high=(high<<8)|255;
+			high=(high<<8)+255;
+			code=(code<<8)+getc(in);
 		}
 
 		return bit;
 	}
 };
 
-template<int rate>
+template<int RATE>
 struct Counter
 {
-	int p;
+	WORD p;
 
 	Counter()
 	{
@@ -135,12 +136,12 @@ struct Counter
 
 	void UpdateBit0()
 	{
-		p-=p>>rate;
+		p-=p>>RATE;
 	}
 
 	void UpdateBit1()
 	{
-		p+=(p^65535)>>rate;
+		p+=(p^65535)>>RATE;
 	}
 };
 
@@ -263,7 +264,7 @@ struct CM: Encoder
 	}
 } cm;
 
-byte* buf;
+BYTE* buf;
 
 void compress(int bsize)
 {
@@ -282,7 +283,7 @@ void compress(int bsize)
 		bsize=int(flen);
 	rewind(in);
 
-	buf=(byte*)calloc(bsize, 5);
+	buf=(BYTE*)calloc(bsize, 5);
 	if (!buf)
 	{
 		fprintf(stderr, "Out of memory\n");
@@ -350,7 +351,7 @@ void decompress()
 			break;
 		if (!bsize)
 		{
-			buf=(byte*)calloc(bsize=n, 5);
+			buf=(BYTE*)calloc(bsize=n, 5);
 			if (!buf)
 			{
 				fprintf(stderr, "Out of memory\n");
@@ -422,7 +423,7 @@ int main(int argc, char** argv)
 	if (argc<2)
 	{
 		fprintf(stderr,
-			"BCM - A BWT-based file compressor, v1.02\n"
+			"BCM - A BWT-based file compressor, v1.03\n"
 			"\n"
 			"Usage: BCM [options] infile [outfile]\n"
 			"\n"
