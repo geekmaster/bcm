@@ -286,7 +286,7 @@ void compress(int bsize)
 	buf=(BYTE*)calloc(bsize, 5);
 	if (!buf)
 	{
-		fprintf(stderr, "Out of memory\n");
+		fprintf(stderr, "Out of memory!\n");
 		exit(1);
 	}
 
@@ -333,7 +333,7 @@ void decompress()
 		|| getc(in)!=magic[2]
 		|| getc(in)!=magic[3])
 	{
-		fprintf(stderr, "Not in BCM format\n");
+		fprintf(stderr, "Not in BCM format!\n");
 		exit(1);
 	}
 
@@ -354,7 +354,7 @@ void decompress()
 			buf=(BYTE*)calloc(bsize=n, 5);
 			if (!buf)
 			{
-				fprintf(stderr, "Out of memory\n");
+				fprintf(stderr, "Out of memory!\n");
 				exit(1);
 			}
 		}
@@ -364,7 +364,7 @@ void decompress()
 			|cm.Decode();
 		if (n<1 || n>bsize || idx<1 || idx>n)
 		{
-			fprintf(stderr, "File corrupted\n");
+			fprintf(stderr, "File corrupted!\n");
 			exit(1);
 		}
 		// Inverse BWT
@@ -388,7 +388,7 @@ int main(int argc, char** argv)
 {
 	const clock_t start=clock();
 
-	int bsize=20<<20; // 20 MB
+	int bsize=32<<20; // 32 MB
 	bool do_decomp=false;
 	bool overwrite=false;
 
@@ -401,7 +401,7 @@ int main(int argc, char** argv)
 				<<(argv[1][strlen(argv[1])-1]=='k'?10:20);
 			if (bsize<1)
 			{
-				fprintf(stderr, "Block size is out of range\n");
+				fprintf(stderr, "Block size is out of range!\n");
 				exit(1);
 			}
 			break;
@@ -423,12 +423,12 @@ int main(int argc, char** argv)
 	if (argc<2)
 	{
 		fprintf(stderr,
-			"BCM - A BWT-based file compressor, v1.03\n"
+			"BCM - A BWT-based file compressor, v1.04\n"
 			"\n"
 			"Usage: BCM [options] infile [outfile]\n"
 			"\n"
 			"Options:\n"
-			"  -b#[k] Set block size to # MB or KB (default is 20 MB)\n"
+			"  -b#[k] Set block size to # MB or KB (default is 32 MB)\n"
 			"  -d     Decompress\n"
 			"  -f     Force overwrite of output file\n");
 		exit(1);
@@ -472,8 +472,15 @@ int main(int argc, char** argv)
 		if (f)
 		{
 			fclose(f);
-			fprintf(stderr, "%s already exists\n", ofname);
-			exit(1);
+
+			fprintf(stderr, "%s already exists; overwrite (y or n)? ", ofname);
+			fflush(stderr);
+
+			if (getchar()!='y')
+			{
+				fprintf(stderr, "\tnot overwritten\n");
+				exit(1);
+			}
 		}
 	}
 
@@ -492,7 +499,7 @@ int main(int argc, char** argv)
 	else
 		compress(bsize);
 
-	fprintf(stderr, "%lld->%lld in %.3fs\n", _ftelli64(in), _ftelli64(out),
+	fprintf(stderr, "%lld -> %lld in %.3fs\n", _ftelli64(in), _ftelli64(out),
 		double(clock()-start)/CLOCKS_PER_SEC);
 
 	fclose(in);
