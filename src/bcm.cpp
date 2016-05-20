@@ -1,7 +1,7 @@
 /*
 
 BCM - A BWT-based file compressor
-Written and placed in the public domain by Ilya Muravyov
+Copyright (C) 2008-2016 Ilya Muravyov
 
 */
 
