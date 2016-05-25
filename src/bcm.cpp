@@ -1,7 +1,26 @@
 /*
 
 BCM - A BWT-based file compressor
+
 Copyright (C) 2008-2016 Ilya Muravyov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 */
 
@@ -23,6 +42,7 @@ Copyright (C) 2008-2016 Ilya Muravyov
 
 #endif // __GNUC__
 
+#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 1
 #define _CRT_SECURE_NO_WARNINGS
 #define _CRT_DISABLE_PERFCRIT_LOCKS
 
@@ -37,7 +57,7 @@ typedef unsigned short WORD;
 typedef unsigned int DWORD;
 typedef unsigned long long QWORD;
 
-const char magic[]="BCM1";
+const char magic[]="BCM!";
 
 FILE* in;
 FILE* out;
@@ -165,9 +185,30 @@ struct CM: Encoder
 			for (int j=0; j<256; ++j)
 			{
 				for (int k=0; k<17; ++k)
-					counter2[i][j][k].p=(k-(k==16))<<12;
+					counter2[i][j][k].p=(k<<12)-(k==16);
 			}
 		}
+	}
+
+	void Encode32(DWORD n)
+	{
+		for (int i=0; i<32; ++i)
+		{
+			if (n&(1<<31))
+				Encoder::EncodeBit1(1<<17);
+			else
+				Encoder::EncodeBit0(1<<17);
+			n+=n;
+		}
+	}
+
+	DWORD Decode32()
+	{
+		DWORD n=0;
+		for (int i=0; i<32; ++i)
+			n+=n+Encoder::DecodeBit(1<<17);
+
+		return n;
 	}
 
 	void Encode(int c)
@@ -184,7 +225,7 @@ struct CM: Encoder
 			const int p0=counter0[ctx].p;
 			const int p1=counter1[c1][ctx].p;
 			const int p2=counter1[c2][ctx].p;
-			const int p=(p0+p0+p0+p0+p1+p1+p1+p2)>>3;
+			const int p=((p0+p1)*7+p2+p2)>>4;
 
 			const int j=p>>12;
 			const int x1=counter2[f][ctx][j].p;
@@ -196,7 +237,7 @@ struct CM: Encoder
 
 			if (bit)
 			{
-				Encoder::EncodeBit1(p+ssep+ssep+ssep);
+				Encoder::EncodeBit1(ssep*3+p);
 				counter0[ctx].UpdateBit1();
 				counter1[c1][ctx].UpdateBit1();
 				counter2[f][ctx][j].UpdateBit1();
@@ -205,7 +246,7 @@ struct CM: Encoder
 			}
 			else
 			{
-				Encoder::EncodeBit0(p+ssep+ssep+ssep);
+				Encoder::EncodeBit0(ssep*3+p);
 				counter0[ctx].UpdateBit0();
 				counter1[c1][ctx].UpdateBit0();
 				counter2[f][ctx][j].UpdateBit0();
@@ -232,14 +273,14 @@ struct CM: Encoder
 			const int p0=counter0[ctx].p;
 			const int p1=counter1[c1][ctx].p;
 			const int p2=counter1[c2][ctx].p;
-			const int p=(p0+p0+p0+p0+p1+p1+p1+p2)>>3;
+			const int p=((p0+p1)*7+p2+p2)>>4;
 
 			const int j=p>>12;
 			const int x1=counter2[f][ctx][j].p;
 			const int x2=counter2[f][ctx][j+1].p;
 			const int ssep=x1+(((x2-x1)*(p&4095))>>12);
 
-			const int bit=Encoder::DecodeBit(p+ssep+ssep+ssep);
+			const int bit=Encoder::DecodeBit(ssep*3+p);
 
 			if (bit)
 			{
@@ -263,6 +304,64 @@ struct CM: Encoder
 		return c1=ctx&255;
 	}
 } cm;
+
+struct CRC
+{
+	DWORD t[4][256];
+	DWORD crc;
+
+	CRC()
+	{
+		for (int i=0; i<256; ++i)
+		{
+			DWORD r=i;
+			for (int j=0; j<8; ++j)
+				r=(r>>1)^(-int(r&1)&0xedb88320);
+			t[0][i]=r;
+		}
+
+		for (int i=0; i<256; ++i)
+		{
+			t[1][i]=t[0][t[0][i]&255]^(t[0][i]>>8);
+			t[2][i]=t[0][t[1][i]&255]^(t[1][i]>>8);
+			t[3][i]=t[0][t[2][i]&255]^(t[2][i]>>8);
+		}
+
+		crc=DWORD(-1);
+	}
+
+	DWORD operator()() const
+	{
+		return ~crc;
+	}
+
+	void Clear()
+	{
+		crc=DWORD(-1);
+	}
+
+	void Update(int c)
+	{
+		crc=t[0][(crc^c)&255]^(crc>>8);
+	}
+
+	void Update(BYTE* p, int n)
+	{
+#ifdef _WIN32
+		for (; n>=4; n-=4)
+		{
+			crc^=*(const DWORD*)p;
+			p+=4;
+			crc=t[0][crc>>24]
+				^t[1][(crc>>16)&255]
+				^t[2][(crc>>8)&255]
+				^t[3][crc&255];
+		}
+#endif
+		for (; n>0; --n)
+			crc=t[0][(crc^*p++)&255]^(crc>>8);
+	}
+} crc;
 
 BYTE* buf;
 
@@ -298,6 +397,8 @@ void compress(int bsize)
 	int n;
 	while ((n=fread(buf, 1, bsize, in))>0)
 	{
+		crc.Update(buf, n);
+
 		const int idx=divbwt(buf, buf, (int*)&buf[bsize], n);
 		if (idx<1)
 		{
@@ -305,23 +406,15 @@ void compress(int bsize)
 			exit(1);
 		}
 
-		cm.Encode(n>>24);
-		cm.Encode(n>>16);
-		cm.Encode(n>>8);
-		cm.Encode(n);
-		cm.Encode(idx>>24);
-		cm.Encode(idx>>16);
-		cm.Encode(idx>>8);
-		cm.Encode(idx);
+		cm.Encode32(n);
+		cm.Encode32(idx);
 
 		for (int i=0; i<n; ++i)
 			cm.Encode(buf[i]);
 	}
 
-	cm.Encode(0); // EOF
-	cm.Encode(0);
-	cm.Encode(0);
-	cm.Encode(0);
+	cm.Encode32(0); // EOF
+	cm.Encode32(crc());
 
 	cm.Flush();
 }
@@ -341,14 +434,9 @@ void decompress()
 
 	int bsize=0;
 
-	for (;;)
+	int n;
+	while ((n=cm.Decode32())>0)
 	{
-		const int n=(cm.Decode()<<24)
-			|(cm.Decode()<<16)
-			|(cm.Decode()<<8)
-			|cm.Decode();
-		if (!n) // EOF
-			break;
 		if (!bsize)
 		{
 			buf=(BYTE*)calloc(bsize=n, 5);
@@ -358,16 +446,14 @@ void decompress()
 				exit(1);
 			}
 		}
-		const int idx=(cm.Decode()<<24)
-			|(cm.Decode()<<16)
-			|(cm.Decode()<<8)
-			|cm.Decode();
-		if (n<1 || n>bsize || idx<1 || idx>n)
+
+		const int idx=cm.Decode32();
+		if (n>bsize || idx<1 || idx>n)
 		{
 			fprintf(stderr, "File corrupted!\n");
 			exit(1);
 		}
-		// Inverse BWT
+		// Inverse BW-transform
 		int t[257]={0};
 		for (int i=0; i<n; ++i)
 			++t[(buf[i]=cm.Decode())+1];
@@ -379,8 +465,16 @@ void decompress()
 		for (int p=idx; p;)
 		{
 			p=next[p-1];
-			putc(buf[p-(p>=idx)], out);
+			const int c=buf[p-(p>=idx)];
+			putc(c, out);
+			crc.Update(c);
 		}
+	}
+
+	if (cm.Decode32()!=crc())
+	{
+		fprintf(stderr, "CRC error!\n");
+		exit(1);
 	}
 }
 
@@ -423,7 +517,8 @@ int main(int argc, char** argv)
 	if (argc<2)
 	{
 		fprintf(stderr,
-			"BCM - A BWT-based file compressor, v1.04\n"
+			"BCM - A BWT-based file compressor, v1.10 beta\n"
+			"Copyright (C) 2008-2016 Ilya Muravyov\n"
 			"\n"
 			"Usage: BCM [options] infile [outfile]\n"
 			"\n"
@@ -459,13 +554,6 @@ int main(int argc, char** argv)
 	else
 		strcpy(ofname, argv[2]);
 
-	if (!strcmp(ofname, argv[1]))
-	{
-		fprintf(stderr, "%s: Cannot %scompress onto itself\n", argv[1],
-			do_decomp?"de":"");
-		exit(1);
-	}
-
 	if (!overwrite)
 	{
 		FILE* f=fopen(ofname, "rb");
@@ -473,14 +561,11 @@ int main(int argc, char** argv)
 		{
 			fclose(f);
 
-			fprintf(stderr, "%s already exists; overwrite (y or n)? ", ofname);
+			fprintf(stderr, "%s already exists. Overwrite (y/n)? ", ofname);
 			fflush(stderr);
 
 			if (getchar()!='y')
-			{
-				fprintf(stderr, "\tnot overwritten\n");
 				exit(1);
-			}
 		}
 	}
 
@@ -491,16 +576,25 @@ int main(int argc, char** argv)
 		exit(1);
 	}
 
-	fprintf(stderr, "%s: ", argv[1]);
-	fflush(stderr);
-
 	if (do_decomp)
-		decompress();
-	else
-		compress(bsize);
+	{
+		fprintf(stderr, "Decompressing %s: ", argv[1]);
+		fflush(stderr);
 
-	fprintf(stderr, "%lld -> %lld in %.3fs\n", _ftelli64(in), _ftelli64(out),
+		decompress();
+	}
+	else
+	{
+		fprintf(stderr, "Compressing %s: ", argv[1]);
+		fflush(stderr);
+
+		compress(bsize);
+	}
+
+	fprintf(stderr, "%lld->%lld in %.1fs\n", _ftelli64(in), _ftelli64(out),
 		double(clock()-start)/CLOCKS_PER_SEC);
+
+	fprintf(stderr, "CRC = %08X\n", crc()); // DEBUG
 
 	fclose(in);
 	fclose(out);
