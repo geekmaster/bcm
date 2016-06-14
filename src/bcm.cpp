@@ -24,24 +24,22 @@ SOFTWARE.
 
 */
 
-#ifdef __GNUC__
+#ifndef _MSC_VER
+#  define _FILE_OFFSET_BITS 64
 
-#define _FILE_OFFSET_BITS 64
-#define _fseeki64 fseeko64
-#define _ftelli64 ftello64
-#define _stati64 stat
+#  define _fseeki64 fseeko
+#  define _ftelli64 ftello
+#  define _stati64 stat
 
-#ifdef HAVE_GETC_UNLOCKED
-#undef getc
-#define getc getc_unlocked
+#  ifdef HAVE_GETC_UNLOCKED
+#    undef getc
+#    define getc getc_unlocked
+#  endif
+#  ifdef HAVE_PUTC_UNLOCKED
+#    undef putc
+#    define putc putc_unlocked
+#  endif
 #endif
-
-#ifdef HAVE_PUTC_UNLOCKED
-#undef putc
-#define putc putc_unlocked
-#endif
-
-#endif // __GNUC__
 
 #define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 1
 #define _CRT_SECURE_NO_WARNINGS
@@ -53,9 +51,14 @@ SOFTWARE.
 #include <time.h>
 
 #ifndef NO_UTIME
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/utime.h>
+#  include <sys/types.h>
+#  include <sys/stat.h>
+
+#  ifdef _MSC_VER
+#    include <sys/utime.h>
+#  else
+#    include <utime.h>
+#  endif
 #endif
 
 #include "divsufsort.h" // libdivsufsort-lite
@@ -373,20 +376,12 @@ struct CRC
 
 void compress(int bsize)
 {
-  if (_fseeki64(fin, 0, SEEK_END))
-  {
-    perror("Fseek failed");
-    exit(1);
-  }
+  _fseeki64(fin, 0, SEEK_END);
   const long long flen=_ftelli64(fin);
-  if (flen<0)
-  {
-    perror("Ftell failed");
-    exit(1);
-  }
-  if (bsize>flen)
+  _fseeki64(fin, 0, SEEK_SET);
+
+  if (flen>0 && bsize>flen)
     bsize=int(flen);
-  rewind(fin);
 
   byte* buf=(byte*)calloc(bsize, 5);
   if (!buf)
@@ -530,15 +525,15 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.21 beta\n"
+        "BCM - A BWT-based file compressor, v1.22 beta\n"
         "Copyright (C) 2008-2016 Ilya Muravyov\n"
         "\n"
-        "Usage: BCM [options] infile [outfile]\n"
+        "Usage: %s [options] infile [outfile]\n"
         "\n"
         "Options:\n"
         "  -b#[k] Set block size to # MB or KB (default is 32 MB)\n"
         "  -d     Decompress\n"
-        "  -f     Force overwrite of output file\n");
+        "  -f     Force overwrite of output file\n", argv[0]);
     exit(1);
   }
 
