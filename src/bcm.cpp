@@ -29,6 +29,7 @@ SOFTWARE.
 #define _FILE_OFFSET_BITS 64
 #define _fseeki64 fseeko64
 #define _ftelli64 ftello64
+#define _stati64 stat
 
 #ifdef HAVE_GETC_UNLOCKED
 #undef getc
@@ -416,6 +417,8 @@ void compress(int bsize)
 
     for (int i=0; i<n; ++i)
       cm.Encode(buf[i]);
+
+    fprintf(stderr, "%3d%%\r", int((_ftelli64(fin)*100)/flen));
   }
 
   free(buf);
@@ -492,7 +495,7 @@ int main(int argc, char** argv)
 {
   const clock_t start=clock();
 
-  int bsize=64<<20; // 64 MB
+  int bsize=32<<20; // 32 MB
   bool do_decomp=false;
   bool overwrite=false;
 
@@ -527,13 +530,13 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.20 beta\n"
+        "BCM - A BWT-based file compressor, v1.21 beta\n"
         "Copyright (C) 2008-2016 Ilya Muravyov\n"
         "\n"
         "Usage: BCM [options] infile [outfile]\n"
         "\n"
         "Options:\n"
-        "  -b#[k] Set block size to # MB or KB (default is 64 MB)\n"
+        "  -b#[k] Set block size to # MB or KB (default is 32 MB)\n"
         "  -d     Decompress\n"
         "  -f     Force overwrite of output file\n");
     exit(1);
@@ -588,15 +591,13 @@ int main(int argc, char** argv)
 
   if (do_decomp)
   {
-    fprintf(stderr, "Decompressing %s: ", argv[1]);
-    fflush(stderr);
+    fprintf(stderr, "Decompressing %s:\n", argv[1]);
 
     decompress();
   }
   else
   {
-    fprintf(stderr, "Compressing %s: ", argv[1]);
-    fflush(stderr);
+    fprintf(stderr, "Compressing %s:\n", argv[1]);
 
     compress(bsize);
   }
@@ -608,8 +609,8 @@ int main(int argc, char** argv)
   fclose(fout);
 
 #ifndef NO_UTIME
-  struct stat sb;
-  if (stat(argv[1], &sb))
+  struct _stati64 sb;
+  if (_stati64(argv[1], &sb))
   {
     perror("Stat failed");
     exit(1);
