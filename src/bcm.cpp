@@ -413,7 +413,8 @@ void compress(int bsize)
     for (int i=0; i<n; ++i)
       cm.Encode(buf[i]);
 
-    fprintf(stderr, "%3d%%\r", int((_ftelli64(fin)*100)/flen));
+    if (flen>0)
+      fprintf(stderr, "%3d%%\r", int((_ftelli64(fin)*100)/flen));
   }
 
   free(buf);
