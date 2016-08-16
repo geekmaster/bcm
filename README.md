@@ -1,4 +1,4 @@
-# BCM v1.21 beta
+# BCM v1.22 beta
 
 ### Description
 BCM is a high-performance file compressor that utilizes advanced context modeling techniques to achieve a very high compression ratio. All in all, it's like a big brother of the BZIP2.
