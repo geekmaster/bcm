@@ -2,7 +2,7 @@
 
 BCM - A BWT-based file compressor
 
-Copyright (C) 2008-2016 Ilya Muravyov
+Copyright (C) 2008-2018 Ilya Muravyov
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -318,7 +318,7 @@ struct CM: Encoder
 
 struct CRC
 {
-  uint t[4][256];
+  uint t[256];
   uint crc;
 
   CRC()
@@ -328,16 +328,14 @@ struct CRC
       uint r=i;
       for (int j=0; j<8; ++j)
         r=(r>>1)^(-int(r&1)&0xedb88320);
-      t[0][i]=r;
+      t[i]=r;
     }
 
-    for (int i=0; i<256; ++i)
-    {
-      t[1][i]=t[0][t[0][i]&255]^(t[0][i]>>8);
-      t[2][i]=t[0][t[1][i]&255]^(t[1][i]>>8);
-      t[3][i]=t[0][t[2][i]&255]^(t[2][i]>>8);
-    }
+    crc=uint(-1);
+  }
 
+  void Clear()
+  {
     crc=uint(-1);
   }
 
@@ -346,33 +344,25 @@ struct CRC
     return ~crc;
   }
 
-  void Clear()
-  {
-    crc=uint(-1);
-  }
-
   void Update(int c)
   {
-    crc=t[0][(crc^c)&255]^(crc>>8);
-  }
-
-  void Update(byte* p, int n)
-  {
-#ifdef _WIN32
-    for (; n>=4; n-=4)
-    {
-      crc^=*(const uint*)p;
-      p+=4;
-      crc=t[0][crc>>24]
-          ^t[1][(crc>>16)&255]
-          ^t[2][(crc>>8)&255]
-          ^t[3][crc&255];
-    }
-#endif
-    for (; n>0; --n)
-      crc=t[0][(crc^*p++)&255]^(crc>>8);
+    crc=t[(crc^c)&255]^(crc>>8);
   }
 } crc;
+
+template<typename T>
+inline T* mem_alloc(size_t n)
+{
+  T* p=(T*)malloc(n*sizeof(T));
+  if (!p)
+  {
+    fprintf(stderr, "Out of memory!\n");
+    exit(1);
+  }
+  return p;
+}
+
+#define mem_free(p) free(p)
 
 void compress(int bsize)
 {
@@ -383,12 +373,8 @@ void compress(int bsize)
   if (flen>0 && bsize>flen)
     bsize=int(flen);
 
-  byte* buf=(byte*)calloc(bsize, 5);
-  if (!buf)
-  {
-    fprintf(stderr, "Out of memory!\n");
-    exit(1);
-  }
+  byte* buf=mem_alloc<byte>(bsize);
+  int* ptr=mem_alloc<int>(bsize);
 
   putc(magic[0], fout);
   putc(magic[1], fout);
@@ -398,9 +384,10 @@ void compress(int bsize)
   int n;
   while ((n=fread(buf, 1, bsize, fin))>0)
   {
-    crc.Update(buf, n);
+    for (int i=0; i<n; ++i)
+      crc.Update(buf[i]);
 
-    const int idx=divbwt(buf, buf, (int*)&buf[bsize], n);
+    const int idx=divbwt(buf, buf, ptr, n);
     if (idx<1)
     {
       perror("Divbwt failed");
@@ -413,16 +400,16 @@ void compress(int bsize)
     for (int i=0; i<n; ++i)
       cm.Encode(buf[i]);
 
-    if (flen>0)
-      fprintf(stderr, "%3d%%\r", int((_ftelli64(fin)*100)/flen));
+    fprintf(stderr, "%lld -> %lld\r", _ftelli64(fin), _ftelli64(fout));
   }
-
-  free(buf);
 
   cm.Encode32(0); // EOF
   cm.Encode32(crc());
 
   cm.Flush();
+
+  mem_free(buf);
+  mem_free(ptr);
 }
 
 void decompress()
@@ -439,59 +426,81 @@ void decompress()
   cm.Init();
 
   int bsize=0;
-  byte* buf;
+  byte* buf=NULL;
+  uint* ptr=NULL;
 
   int n;
   while ((n=cm.Decode32())>0)
   {
     if (!bsize)
     {
-      buf=(byte*)calloc(bsize=n, 5);
-      if (!buf)
-      {
-        fprintf(stderr, "Out of memory!\n");
-        exit(1);
-      }
+      if ((bsize=n)>=(1<<24)) // 5n
+        buf=mem_alloc<byte>(bsize);
+
+      ptr=mem_alloc<uint>(bsize);
     }
 
     const int idx=cm.Decode32();
     if (n>bsize || idx<1 || idx>n)
     {
-      fprintf(stderr, "File corrupted!\n");
+      fprintf(stderr, "Corrupt input!\n");
       exit(1);
     }
-    // Inverse BW-transform
-    int t[257]={0};
-    for (int i=0; i<n; ++i)
-      ++t[(buf[i]=cm.Decode())+1];
-    for (int i=1; i<256; ++i)
-      t[i]+=t[i-1];
-    int* next=(int*)&buf[bsize];
-    for (int i=0; i<n; ++i)
-      next[t[buf[i]]++]=i+(i>=idx);
-    for (int p=idx; p;)
-    {
-      p=next[p-1];
-      const int c=buf[p-(p>=idx)];
-      putc(c, fout);
-      crc.Update(c);
-    }
-  }
 
-  free(buf);
+    // Inverse BW-transform
+    if (n>=(1<<24)) // 5n
+    {
+      int t[257]={0};
+      for (int i=0; i<n; ++i)
+        ++t[(buf[i]=cm.Decode())+1];
+      for (int i=1; i<256; ++i)
+        t[i]+=t[i-1];
+      for (int i=0; i<n; ++i)
+        ptr[t[buf[i]]++]=i+(i>=idx);
+      for (int p=idx; p;)
+      {
+        p=ptr[p-1];
+        const int c=buf[p-(p>=idx)];
+        putc(c, fout);
+        crc.Update(c);
+      }
+    }
+    else // 4n
+    {
+      int t[257]={0};
+      for (int i=0; i<n; ++i)
+        ++t[(ptr[i]=cm.Decode())+1];
+      for (int i=1; i<256; ++i)
+        t[i]+=t[i-1];
+      for (int i=0; i<n; ++i)
+        ptr[t[ptr[i]&255]++]|=(i+(i>=idx))<<8;
+      for (int p=idx; p;)
+      {
+        p=ptr[p-1]>>8;
+        const int c=ptr[p-(p>=idx)]&255;
+        putc(c, fout);
+        crc.Update(c);
+      }
+    }
+
+    fprintf(stderr, "%lld -> %lld\r", _ftelli64(fin), _ftelli64(fout));
+  }
 
   if (cm.Decode32()!=crc())
   {
     fprintf(stderr, "CRC error!\n");
     exit(1);
   }
+
+  mem_free(buf);
+  mem_free(ptr);
 }
 
 int main(int argc, char** argv)
 {
   const clock_t start=clock();
 
-  int bsize=32<<20; // 32 MB
+  int bsize=(1<<24)-1; // 16 MB
   bool do_decomp=false;
   bool overwrite=false;
 
@@ -526,13 +535,13 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.25\n"
-        "Copyright (C) 2008-2016 Ilya Muravyov\n"
+        "BCM - A BWT-based file compressor, v1.30\n"
+        "Copyright (C) 2008-2018 Ilya Muravyov\n"
         "\n"
         "Usage: %s [options] infile [outfile]\n"
         "\n"
         "Options:\n"
-        "  -b#[k] Set block size to # MB or KB (default is 32 MB)\n"
+        "  -b#[k] Set block size to # MB or KB (default is 16 MB)\n"
         "  -d     Decompress\n"
         "  -f     Force overwrite of output file\n", argv[0]);
     exit(1);
@@ -571,7 +580,6 @@ int main(int argc, char** argv)
       fclose(f);
 
       fprintf(stderr, "%s already exists. Overwrite (y/n)? ", ofname);
-      fflush(stderr);
 
       if (getchar()!='y')
         exit(1);
@@ -620,8 +628,6 @@ int main(int argc, char** argv)
     exit(1);
   }
 #endif
-
-  fprintf(stderr, "CRC = %08X\n", crc()); // DEBUG
 
   return 0;
 }
