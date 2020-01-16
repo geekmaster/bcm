@@ -2,25 +2,7 @@
 
 BCM - A BWT-based file compressor
 
-Copyright (C) 2008-2018 Ilya Muravyov
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Written and placed in the public domain by Ilya Muravyov
 
 */
 
@@ -63,64 +45,37 @@ SOFTWARE.
 
 #include "divsufsort.h" // libdivsufsort-lite
 
-typedef unsigned char byte;
-typedef unsigned short word;
-typedef unsigned int uint;
-typedef unsigned long long ulonglong;
+typedef unsigned char U8;
+typedef unsigned short U16;
+typedef unsigned int U32;
+typedef unsigned long long U64;
+typedef signed long long S64;
 
-const char magic[]="BCM!";
+// Globals
 
-FILE* fin;
-FILE* fout;
+FILE* g_in;
+FILE* g_out;
+
+const char g_magic[]="BCM!";
 
 struct Encoder
 {
-  uint low;
-  uint high;
-  uint code;
+  U32 low;
+  U32 high;
+  U32 code;
 
   Encoder()
   {
     low=0;
-    high=uint(-1);
+    high=0xFFFFFFFF;
     code=0;
-  }
-
-  void EncodeBit0(uint p)
-  {
-#ifdef _WIN64
-    low+=((ulonglong(high-low)*p)>>18)+1;
-#else
-    low+=((ulonglong(high-low)*(p<<(32-18)))>>32)+1;
-#endif
-    while ((low^high)<(1<<24))
-    {
-      putc(low>>24, fout);
-      low<<=8;
-      high=(high<<8)+255;
-    }
-  }
-
-  void EncodeBit1(uint p)
-  {
-#ifdef _WIN64
-    high=low+((ulonglong(high-low)*p)>>18);
-#else
-    high=low+((ulonglong(high-low)*(p<<(32-18)))>>32);
-#endif
-    while ((low^high)<(1<<24))
-    {
-      putc(low>>24, fout);
-      low<<=8;
-      high=(high<<8)+255;
-    }
   }
 
   void Flush()
   {
     for (int i=0; i<4; ++i)
     {
-      putc(low>>24, fout);
+      putc(low>>24, g_out);
       low<<=8;
     }
   }
@@ -128,15 +83,94 @@ struct Encoder
   void Init()
   {
     for (int i=0; i<4; ++i)
-      code=(code<<8)+getc(fin);
+      code=(code<<8)+getc(g_in);
   }
 
-  int DecodeBit(uint p)
+  template<int N>
+  void EncodeDirectBits(U32 x)
+  {
+    for (U32 i=1<<(N-1); i!=0; i>>=1)
+    {
+      if (x&i)
+        high=low+((high-low)>>1);
+      else
+        low+=((high-low)>>1)+1;
+
+      if ((low^high)<(1<<24))
+      {
+        putc(low>>24, g_out);
+        low<<=8;
+        high=(high<<8)+255;
+      }
+    }
+  }
+
+  void EncodeBit1(U32 p)
   {
 #ifdef _WIN64
-    const uint mid=low+((ulonglong(high-low)*p)>>18);
+    high=low+((U64(high-low)*p)>>18);
 #else
-    const uint mid=low+((ulonglong(high-low)*(p<<(32-18)))>>32);
+    high=low+((U64(high-low)*(p<<(32-18)))>>32);
+#endif
+    while ((low^high)<(1<<24))
+    {
+      putc(low>>24, g_out);
+      low<<=8;
+      high=(high<<8)+255;
+    }
+  }
+
+  void EncodeBit0(U32 p)
+  {
+#ifdef _WIN64
+    low+=((U64(high-low)*p)>>18)+1;
+#else
+    low+=((U64(high-low)*(p<<(32-18)))>>32)+1;
+#endif
+    while ((low^high)<(1<<24))
+    {
+      putc(low>>24, g_out);
+      low<<=8;
+      high=(high<<8)+255;
+    }
+  }
+
+  template<int N>
+  U32 DecodeDirectBits()
+  {
+    U32 x=0;
+
+    for (int i=0; i<N; ++i)
+    {
+      const U32 mid=low+((high-low)>>1);
+      if (code<=mid)
+      {
+        high=mid;
+        x+=x+1;
+      }
+      else
+      {
+        low=mid+1;
+        x+=x;
+      }
+
+      if ((low^high)<(1<<24))
+      {
+        low<<=8;
+        high=(high<<8)+255;
+        code=(code<<8)+getc(g_in);
+      }
+    }
+
+    return x;
+  }
+
+  int DecodeBit(U32 p)
+  {
+#ifdef _WIN64
+    const U32 mid=low+((U64(high-low)*p)>>18);
+#else
+    const U32 mid=low+((U64(high-low)*(p<<(32-18)))>>32);
 #endif
     const int bit=(code<=mid);
     if (bit)
@@ -148,7 +182,7 @@ struct Encoder
     {
       low<<=8;
       high=(high<<8)+255;
-      code=(code<<8)+getc(fin);
+      code=(code<<8)+getc(g_in);
     }
 
     return bit;
@@ -158,11 +192,11 @@ struct Encoder
 template<int RATE>
 struct Counter
 {
-  word p;
+  U16 p;
 
   Counter()
   {
-    p=1<<15;
+    p=1<<15; // 0.5
   }
 
   void UpdateBit0()
@@ -172,7 +206,7 @@ struct Counter
 
   void UpdateBit1()
   {
-    p+=(p^65535)>>RATE;
+    p+=(p^0xFFFF)>>RATE;
   }
 };
 
@@ -201,27 +235,6 @@ struct CM: Encoder
     }
   }
 
-  void Encode32(uint n)
-  {
-    for (int i=0; i<32; ++i)
-    {
-      if (n&(1<<31))
-        Encoder::EncodeBit1(1<<17);
-      else
-        Encoder::EncodeBit0(1<<17);
-      n+=n;
-    }
-  }
-
-  uint Decode32()
-  {
-    uint n=0;
-    for (int i=0; i<32; ++i)
-      n+=n+Encoder::DecodeBit(1<<17);
-
-    return n;
-  }
-
   void Encode(int c)
   {
     if (c1==c2)
@@ -236,19 +249,16 @@ struct CM: Encoder
       const int p0=counter0[ctx].p;
       const int p1=counter1[c1][ctx].p;
       const int p2=counter1[c2][ctx].p;
-      const int p=((p0+p1)*7+p2+p2)>>4;
+      const int p=(((p0+p1)*7)+p2+p2)>>4;
 
       const int j=p>>12;
       const int x1=counter2[f][ctx][j].p;
       const int x2=counter2[f][ctx][j+1].p;
       const int ssep=x1+(((x2-x1)*(p&4095))>>12);
 
-      const int bit=c&128;
-      c+=c;
-
-      if (bit)
+      if (c&128)
       {
-        Encoder::EncodeBit1(ssep*3+p);
+        Encoder::EncodeBit1((ssep*3)+p);
         counter0[ctx].UpdateBit1();
         counter1[c1][ctx].UpdateBit1();
         counter2[f][ctx][j].UpdateBit1();
@@ -257,17 +267,19 @@ struct CM: Encoder
       }
       else
       {
-        Encoder::EncodeBit0(ssep*3+p);
+        Encoder::EncodeBit0((ssep*3)+p);
         counter0[ctx].UpdateBit0();
         counter1[c1][ctx].UpdateBit0();
         counter2[f][ctx][j].UpdateBit0();
         counter2[f][ctx][j+1].UpdateBit0();
         ctx+=ctx;
       }
+
+      c+=c;
     }
 
     c2=c1;
-    c1=ctx&255;
+    c1=ctx-256;
   }
 
   int Decode()
@@ -284,16 +296,14 @@ struct CM: Encoder
       const int p0=counter0[ctx].p;
       const int p1=counter1[c1][ctx].p;
       const int p2=counter1[c2][ctx].p;
-      const int p=((p0+p1)*7+p2+p2)>>4;
+      const int p=(((p0+p1)*7)+p2+p2)>>4;
 
       const int j=p>>12;
       const int x1=counter2[f][ctx][j].p;
       const int x2=counter2[f][ctx][j+1].p;
       const int ssep=x1+(((x2-x1)*(p&4095))>>12);
 
-      const int bit=Encoder::DecodeBit(ssep*3+p);
-
-      if (bit)
+      if (Encoder::DecodeBit((ssep*3)+p))
       {
         counter0[ctx].UpdateBit1();
         counter1[c1][ctx].UpdateBit1();
@@ -312,41 +322,41 @@ struct CM: Encoder
     }
 
     c2=c1;
-    return c1=ctx&255;
+    return c1=ctx-256;
   }
 } cm;
 
 struct CRC
 {
-  uint t[256];
-  uint crc;
+  U32 tab[256];
+  U32 crc;
 
   CRC()
   {
     for (int i=0; i<256; ++i)
     {
-      uint r=i;
+      U32 r=i; 
       for (int j=0; j<8; ++j)
-        r=(r>>1)^(-int(r&1)&0xedb88320);
-      t[i]=r;
+        r=(r>>1)^(0xEDB88320&-int(r&1));
+      tab[i]=r;
     }
 
-    crc=uint(-1);
+    crc=0xFFFFFFFF;
   }
 
   void Clear()
   {
-    crc=uint(-1);
+    crc=0xFFFFFFFF;
   }
 
-  uint operator()() const
+  U32 operator()() const
   {
-    return ~crc;
+    return crc^0xFFFFFFFF;
   }
 
   void Update(int c)
   {
-    crc=t[(crc^c)&255]^(crc>>8);
+    crc=(crc>>8)^tab[(crc^c)&255];
   }
 } crc;
 
@@ -356,33 +366,45 @@ inline T* mem_alloc(size_t n)
   T* p=(T*)malloc(n*sizeof(T));
   if (!p)
   {
-    fprintf(stderr, "Out of memory!\n");
+    perror("Malloc() failed");
     exit(1);
   }
+
   return p;
 }
 
 #define mem_free(p) free(p)
 
-void compress(int bsize)
+void compress(int level)
 {
-  _fseeki64(fin, 0, SEEK_END);
-  const long long flen=_ftelli64(fin);
-  _fseeki64(fin, 0, SEEK_SET);
+  const int config_tab[10]=
+  {
+    0,
+    1<<20,      // -1 - 1 MB
+    1<<22,      // -2 - 4 MB
+    1<<23,      // -3 - 8 MB
+    0x00FFFFFF, // -4 - ~16 MB (Default)
+    1<<25,      // -5 - 32 MB
+    1<<26,      // -6 - 64 MB
+    1<<27,      // -7 - 128 MB
+    1<<28,      // -8 - 256 MB
+    0x7FFFFFFF, // -9 - ~2 GB
+  };
 
-  if (flen>0 && bsize>flen)
-    bsize=int(flen);
+  int block_size=config_tab[level];
 
-  byte* buf=mem_alloc<byte>(bsize);
-  int* ptr=mem_alloc<int>(bsize);
+  _fseeki64(g_in, 0, SEEK_END);
+  const S64 file_size=_ftelli64(g_in);
+  _fseeki64(g_in, 0, SEEK_SET);
 
-  putc(magic[0], fout);
-  putc(magic[1], fout);
-  putc(magic[2], fout);
-  putc(magic[3], fout);
+  if (file_size>0 && block_size>file_size)
+    block_size=int(file_size);
+
+  U8* buf=mem_alloc<U8>(block_size);
+  int* ptr=mem_alloc<int>(block_size);
 
   int n;
-  while ((n=fread(buf, 1, bsize, fin))>0)
+  while ((n=fread(buf, 1, block_size, g_in))>0)
   {
     for (int i=0; i<n; ++i)
       crc.Update(buf[i]);
@@ -390,21 +412,21 @@ void compress(int bsize)
     const int idx=divbwt(buf, buf, ptr, n);
     if (idx<1)
     {
-      perror("Divbwt failed");
+      perror("Divbwt() failed");
       exit(1);
     }
 
-    cm.Encode32(n);
-    cm.Encode32(idx);
+    cm.EncodeDirectBits<32>(n);
+    cm.EncodeDirectBits<32>(idx);
 
     for (int i=0; i<n; ++i)
       cm.Encode(buf[i]);
 
-    fprintf(stderr, "%lld -> %lld\r", _ftelli64(fin), _ftelli64(fout));
+    fprintf(stderr, "%lld -> %lld\r", _ftelli64(g_in), _ftelli64(g_out));
   }
 
-  cm.Encode32(0); // EOF
-  cm.Encode32(crc());
+  cm.EncodeDirectBits<32>(0); // EOF
+  cm.EncodeDirectBits<32>(crc());
 
   cm.Flush();
 
@@ -414,41 +436,32 @@ void compress(int bsize)
 
 void decompress()
 {
-  if (getc(fin)!=magic[0]
-      ||getc(fin)!=magic[1]
-      ||getc(fin)!=magic[2]
-      ||getc(fin)!=magic[3])
-  {
-    fprintf(stderr, "Not in BCM format!\n");
-    exit(1);
-  }
-
   cm.Init();
 
-  int bsize=0;
-  byte* buf=NULL;
-  uint* ptr=NULL;
+  int block_size=0;
+  U8* buf=NULL;
+  U32* ptr=NULL;
 
   int n;
-  while ((n=cm.Decode32())>0)
+  while ((n=cm.DecodeDirectBits<32>())>0)
   {
-    if (!bsize)
+    if (block_size==0)
     {
-      if ((bsize=n)>=(1<<24)) // 5n
-        buf=mem_alloc<byte>(bsize);
+      if ((block_size=n)>=(1<<24)) // 5*N
+        buf=mem_alloc<U8>(block_size);
 
-      ptr=mem_alloc<uint>(bsize);
+      ptr=mem_alloc<U32>(block_size);
     }
 
-    const int idx=cm.Decode32();
-    if (n>bsize || idx<1 || idx>n)
+    const int idx=cm.DecodeDirectBits<32>();
+    if (n>block_size || idx<1 || idx>n)
     {
       fprintf(stderr, "Corrupt input!\n");
       exit(1);
     }
 
     // Inverse BW-transform
-    if (n>=(1<<24)) // 5n
+    if (n>=(1<<24)) // 5*N
     {
       int t[257]={0};
       for (int i=0; i<n; ++i)
@@ -461,11 +474,11 @@ void decompress()
       {
         p=ptr[p-1];
         const int c=buf[p-(p>=idx)];
-        putc(c, fout);
         crc.Update(c);
+        putc(c, g_out);
       }
     }
-    else // 4n
+    else // 4*N
     {
       int t[257]={0};
       for (int i=0; i<n; ++i)
@@ -478,15 +491,15 @@ void decompress()
       {
         p=ptr[p-1]>>8;
         const int c=ptr[p-(p>=idx)]&255;
-        putc(c, fout);
         crc.Update(c);
+        putc(c, g_out);
       }
     }
 
-    fprintf(stderr, "%lld -> %lld\r", _ftelli64(fin), _ftelli64(fout));
+    fprintf(stderr, "%lld -> %lld\r", _ftelli64(g_in), _ftelli64(g_out));
   }
 
-  if (cm.Decode32()!=crc())
+  if (cm.DecodeDirectBits<32>()!=crc())
   {
     fprintf(stderr, "CRC error!\n");
     exit(1);
@@ -500,32 +513,39 @@ int main(int argc, char** argv)
 {
   const clock_t start=clock();
 
-  int bsize=(1<<24)-1; // 16 MB
+  int level=4;
   bool do_decomp=false;
   bool overwrite=false;
 
   while (argc>1 && *argv[1]=='-')
   {
-    switch (argv[1][1])
+    for (int i=1; argv[1][i]!='\0'; ++i)
     {
-    case 'b':
-      bsize=atoi(&argv[1][2])
-          <<(argv[1][strlen(argv[1])-1]=='k'?10:20);
-      if (bsize<1)
+      switch (argv[1][i])
       {
-        fprintf(stderr, "Block size is out of range!\n");
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+      case '6':
+      case '7':
+      case '8':
+#ifdef _WIN64
+      case '9':
+#endif
+        level=argv[1][i]-'0';
+        break;
+      case 'd':
+        do_decomp=true;
+        break;
+      case 'f':
+        overwrite=true;
+        break;
+      default:
+        fprintf(stderr, "Unknown option: -%c\n", argv[1][i]);
         exit(1);
       }
-      break;
-    case 'd':
-      do_decomp=true;
-      break;
-    case 'f':
-      overwrite=true;
-      break;
-    default:
-      fprintf(stderr, "Unknown option: %s\n", argv[1]);
-      exit(1);
     }
 
     --argc;
@@ -535,96 +555,124 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.30\n"
-        "Copyright (C) 2008-2018 Ilya Muravyov\n"
+        "BCM - A BWT-based file compressor, v1.40\n"
         "\n"
-        "Usage: %s [options] infile [outfile]\n"
+        "Usage: BCM [options] infile [outfile]\n"
         "\n"
         "Options:\n"
-        "  -b#[k] Set block size to # MB or KB (default is 16 MB)\n"
-        "  -d     Decompress\n"
-        "  -f     Force overwrite of output file\n", argv[0]);
+#ifdef _WIN64
+        "  -1 .. -9 Set block size to 1 MB .. 2 GB\n"
+#else
+        "  -1 .. -8 Set block size to 1 MB .. 256 MB\n"
+#endif
+        "  -d       Decompress\n"
+        "  -f       Force overwrite of output file\n");
     exit(1);
   }
 
-  fin=fopen(argv[1], "rb");
-  if (!fin)
+  g_in=fopen(argv[1], "rb");
+  if (!g_in)
   {
     perror(argv[1]);
     exit(1);
   }
 
-  char ofname[FILENAME_MAX];
+  char out_name[FILENAME_MAX];
   if (argc<3)
   {
-    strcpy(ofname, argv[1]);
+    strcpy(out_name, argv[1]);
     if (do_decomp)
     {
-      const int p=strlen(ofname)-4;
-      if (p>0 && !strcmp(&ofname[p], ".bcm"))
-        ofname[p]='\0';
+      const int p=strlen(out_name)-4;
+      if (p>0 && strcmp(&out_name[p], ".bcm")==0)
+        out_name[p]='\0';
       else
-        strcat(ofname, ".out");
+        strcat(out_name, ".out");
     }
     else
-      strcat(ofname, ".bcm");
+      strcat(out_name, ".bcm");
   }
   else
-    strcpy(ofname, argv[2]);
+    strcpy(out_name, argv[2]);
 
   if (!overwrite)
   {
-    FILE* f=fopen(ofname, "rb");
+    FILE* f=fopen(out_name, "rb");
     if (f)
     {
       fclose(f);
 
-      fprintf(stderr, "%s already exists. Overwrite (y/n)? ", ofname);
+      fprintf(stderr, "%s already exists. Overwrite (y/n)? ", out_name);
+      fflush(stderr);
 
       if (getchar()!='y')
+      {
+        fprintf(stderr, "Not overwritten\n");
         exit(1);
+      }
     }
-  }
-
-  fout=fopen(ofname, "wb");
-  if (!fout)
-  {
-    perror(ofname);
-    exit(1);
   }
 
   if (do_decomp)
   {
+    if (getc(g_in)!=g_magic[0]
+        ||getc(g_in)!=g_magic[1]
+        ||getc(g_in)!=g_magic[2]
+        ||getc(g_in)!=g_magic[3])
+    {
+      fprintf(stderr, "%s: Not in BCM format\n", argv[1]);
+      exit(1);
+    }
+
+    g_out=fopen(out_name, "wb");
+    if (!g_out)
+    {
+      perror(out_name);
+      exit(1);
+    }
+
     fprintf(stderr, "Decompressing %s:\n", argv[1]);
 
     decompress();
   }
   else
   {
+    g_out=fopen(out_name, "wb");
+    if (!g_out)
+    {
+      perror(out_name);
+      exit(1);
+    }
+
+    putc(g_magic[0], g_out);
+    putc(g_magic[1], g_out);
+    putc(g_magic[2], g_out);
+    putc(g_magic[3], g_out);
+
     fprintf(stderr, "Compressing %s:\n", argv[1]);
 
-    compress(bsize);
+    compress(level);
   }
 
-  fprintf(stderr, "%lld -> %lld in %1.2fs\n", _ftelli64(fin), _ftelli64(fout),
-      double(clock()-start)/CLOCKS_PER_SEC);
+  fprintf(stderr, "%lld -> %lld in %1.1f sec\n", _ftelli64(g_in),
+      _ftelli64(g_out), double(clock()-start)/CLOCKS_PER_SEC);
 
-  fclose(fin);
-  fclose(fout);
+  fclose(g_in);
+  fclose(g_out);
 
 #ifndef NO_UTIME
   struct _stati64 sb;
-  if (_stati64(argv[1], &sb))
+  if (_stati64(argv[1], &sb)!=0)
   {
-    perror("Stat failed");
+    perror("Stat() failed");
     exit(1);
   }
   struct utimbuf ub;
   ub.actime=sb.st_atime;
   ub.modtime=sb.st_mtime;
-  if (utime(ofname, &ub))
+  if (utime(out_name, &ub)!=0)
   {
-    perror("Utime failed");
+    perror("Utime() failed");
     exit(1);
   }
 #endif
