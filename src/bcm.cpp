@@ -530,7 +530,8 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.50\n"
+        "BCM - A BWT-based file compressor, v1.51\n"
+        "Written and placed in the public domain by Ilya Muravyov\n"
         "\n"
         "Usage: BCM [options] infile [outfile]\n"
         "\n"
