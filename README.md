@@ -1,4 +1,4 @@
-# BCM v1.50
+# BCM v1.60
 
 ### Description
 BCM is a high-performance file compressor that utilizes advanced context modeling techniques to achieve a very high compression ratio. All in all, it's like a big brother of the BZIP2.
@@ -18,4 +18,4 @@ BCM -9      | 20,789,667 bytes  |
 Ilya Muravyov
 
 ### Thanks
-Special thanks to Yuta Mori, Matt Mahoney, Eugene Shelwien, Alexander Rhatushnyak, Przemyslaw Skibinski, Malcolm Taylor and LovePimple.
+Special thanks to Ilya Grebnov, Yuta Mori, Matt Mahoney, Eugene Shelwien, Alexander Rhatushnyak, Przemyslaw Skibinski, Malcolm Taylor and LovePimple.
