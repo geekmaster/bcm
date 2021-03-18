@@ -2,7 +2,7 @@
 
 BCM - A BWT-based file compressor
 
-Written and placed in the public domain by Ilya Muravyov
+Copyright (C) 2008-2021 Ilya Muravyov
 
 */
 
@@ -43,7 +43,7 @@ Written and placed in the public domain by Ilya Muravyov
 #  endif
 #endif
 
-#include "divsufsort.h" // libdivsufsort-lite
+#include "libsais.h"
 
 typedef unsigned char U8;
 typedef unsigned short U16;
@@ -299,7 +299,7 @@ struct CRC
   {
     for (int i=0; i<256; ++i)
     {
-      U32 r=i; 
+      U32 r=i;
       for (int j=0; j<8; ++j)
         r=(r>>1)^(0xEDB88320&-int(r&1));
       tab[i]=r;
@@ -312,16 +312,15 @@ struct CRC
     return crc^U32(-1);
   }
 
+  void Update(int c)
+  {
+    crc=(crc>>8)^tab[(crc^c)&255];
+  }
+
   void Update(U8* buf, int n)
   {
     for (int i=0; i<n; ++i)
       crc=(crc>>8)^tab[(crc^buf[i])&255];
-  }
-
-  void Put(int c)
-  {
-    crc=(crc>>8)^tab[(crc^c)&255];
-    putc(c, out);
   }
 } crc;
 
@@ -334,7 +333,6 @@ inline T* MemAlloc(size_t n)
     perror("Malloc() failed");
     exit(1);
   }
-
   return p;
 }
 
@@ -379,10 +377,10 @@ void Compress(int level)
   {
     crc.Update(buf, n);
 
-    const int idx=divbwt(buf, buf, ptr, n);
+    const int idx=libsais_bwt(buf, buf, ptr, n);
     if (idx<1)
     {
-      perror("Divbwt() failed");
+      fprintf(stderr, "BWT() failed: idx = %d\n", idx);
       exit(1);
     }
 
@@ -406,22 +404,21 @@ void Compress(int level)
 
 void Decompress()
 {
-  cm.Init();
+  int cnt[257];
 
   int bsize=0;
-  U8* buf=NULL;
-  U32* ptr=NULL;
+  U8* buf=nullptr;
+  U32* ptr=nullptr;
+
+  cm.Init();
 
   int n;
   while ((n=cm.Get32())>0)
   {
     if (!bsize)
     {
-      bsize=n;
-
-      if (bsize>=(1<<24)) // 5*N
+      if ((bsize=n)>=(1<<24)) // 5*N
         buf=MemAlloc<U8>(bsize);
-
       ptr=MemAlloc<U32>(bsize);
     }
 
@@ -436,7 +433,7 @@ void Decompress()
 
     if (n>=(1<<24)) // 5*N
     {
-      int cnt[257]={0};
+      memset(cnt, 0, sizeof(cnt));
       for (int i=0; i<n; ++i)
         ++cnt[(buf[i]=cm.Get())+1];
       for (int i=1; i<256; ++i)
@@ -447,15 +444,18 @@ void Decompress()
       for (int i=idx+1; i<=n; ++i)
         ptr[cnt[buf[i-1]]++]=i;
 
-      for (int p=idx; p;)
+      int p=idx;
+      for (int i=0; i<n; ++i)
       {
         p=ptr[p-1];
-        crc.Put(buf[p-(p>=idx)]);
+        const int c=buf[p-(p>=idx)];
+        crc.Update(c);
+        putc(c, out);
       }
     }
     else // 4*N
     {
-      int cnt[257]={0};
+      memset(cnt, 0, sizeof(cnt));
       for (int i=0; i<n; ++i)
         ++cnt[(ptr[i]=cm.Get())+1];
       for (int i=1; i<256; ++i)
@@ -466,10 +466,13 @@ void Decompress()
       for (int i=idx+1; i<=n; ++i)
         ptr[cnt[ptr[i-1]&255]++]|=i<<8;
 
-      for (int p=idx; p;)
+      int p=idx;
+      for (int i=0; i<n; ++i)
       {
         p=ptr[p-1]>>8;
-        crc.Put(ptr[p-(p>=idx)]);
+        const int c=ptr[p-(p>=idx)];
+        crc.Update(c);
+        putc(c, out);
       }
     }
 
@@ -482,7 +485,8 @@ void Decompress()
     exit(1);
   }
 
-  free(buf);
+  if (buf)
+    free(buf);
   free(ptr);
 }
 
@@ -518,7 +522,7 @@ int main(int argc, char** argv)
         overwrite=1;
         break;
       default:
-        fprintf(stderr, "Unknown option: -%c\n", argv[1][i]);
+        fprintf(stderr, "Unknown option '-%c'\n", argv[1][i]);
         exit(1);
       }
     }
@@ -530,8 +534,8 @@ int main(int argc, char** argv)
   if (argc<2)
   {
     fprintf(stderr,
-        "BCM - A BWT-based file compressor, v1.51\n"
-        "Written and placed in the public domain by Ilya Muravyov\n"
+        "BCM - A BWT-based file compressor, v1.60\n"
+        "Copyright (C) 2008-2021 Ilya Muravyov\n"
         "\n"
         "Usage: BCM [options] infile [outfile]\n"
         "\n"
@@ -574,7 +578,7 @@ int main(int argc, char** argv)
     {
       fclose(f);
 
-      fprintf(stderr, "%s already exists. Overwrite (y/n)? ", ofname);
+      fprintf(stderr, "File '%s' already exists. Overwrite (y/n)? ", ofname);
       fflush(stderr);
 
       if (getchar()!='y')
@@ -588,9 +592,9 @@ int main(int argc, char** argv)
   if (decompress)
   {
     if (getc(in)!=magic[0]
-        ||getc(in)!=magic[1]
-        ||getc(in)!=magic[2]
-        ||getc(in)!=magic[3])
+        || getc(in)!=magic[1]
+        || getc(in)!=magic[2]
+        || getc(in)!=magic[3])
     {
       fprintf(stderr, "%s: Not in BCM format\n", argv[1]);
       exit(1);
@@ -603,7 +607,7 @@ int main(int argc, char** argv)
       exit(1);
     }
 
-    fprintf(stderr, "Decompressing %s:\n", argv[1]);
+    fprintf(stderr, "Decompressing '%s':\n", argv[1]);
 
     Decompress();
   }
@@ -621,7 +625,7 @@ int main(int argc, char** argv)
     putc(magic[2], out);
     putc(magic[3], out);
 
-    fprintf(stderr, "Compressing %s:\n", argv[1]);
+    fprintf(stderr, "Compressing '%s':\n", argv[1]);
 
     Compress(level);
   }
