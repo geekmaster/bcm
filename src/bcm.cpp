@@ -4,28 +4,29 @@ BCM - A BWT-based file compressor
 
 Copyright (C) 2008-2021 Ilya Muravyov
 
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
 */
 
-#ifndef _MSC_VER
-#  define _FILE_OFFSET_BITS 64
+#ifdef _MSC_VER
+#  define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 1
+#  define _CRT_SECURE_NO_WARNINGS
+#  define _CRT_DISABLE_PERFCRIT_LOCKS
 
-#  define _fseeki64 fseeko
-#  define _ftelli64 ftello
-#  define _stati64 stat
-
-#  ifdef HAVE_GETC_UNLOCKED
-#    undef getc
-#    define getc getc_unlocked
-#  endif
-#  ifdef HAVE_PUTC_UNLOCKED
-#    undef putc
-#    define putc putc_unlocked
-#  endif
+#  define fseeko64 _fseeki64
+#  define ftello64 _ftelli64
+#  define stat64 _stati64
 #endif
-
-#define _CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES 1
-#define _CRT_SECURE_NO_WARNINGS
-#define _CRT_DISABLE_PERFCRIT_LOCKS
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,7 @@ Copyright (C) 2008-2021 Ilya Muravyov
 #  endif
 #endif
 
-#include <libsais.h>
+#include "libsais.h"
 
 typedef unsigned char U8;
 typedef unsigned short U16;
@@ -53,7 +54,7 @@ typedef signed long long S64;
 
 // Globals
 
-const char magic[]="BCM!";
+#define BCM_ID 0x214D4342 // "BCM!"
 
 FILE* in;
 FILE* out;
@@ -67,7 +68,7 @@ struct Encoder
     Encoder()
     {
         low=0;
-        high=U32(-1);
+        high=0xFFFFFFFF;
         code=0;
     }
 
@@ -83,7 +84,7 @@ struct Encoder
     void Init()
     {
         for (int i=0; i<4; ++i)
-            code=(code<<8)+getc(in);
+            code=(code<<8)|getc(in);
     }
 
     template<int P_LOG>
@@ -101,7 +102,7 @@ struct Encoder
         {
             putc(low>>24, out);
             low<<=8;
-            high=(high<<8)+255;
+            high=(high<<8)|255;
         }
     }
 
@@ -120,8 +121,8 @@ struct Encoder
         while ((low^high)<(1<<24))
         {
             low<<=8;
-            high=(high<<8)+255;
-            code=(code<<8)+getc(in);
+            high=(high<<8)|255;
+            code=(code<<8)|getc(in);
         }
 
         return bit;
@@ -292,42 +293,64 @@ struct CM: Encoder
 
 struct CRC
 {
-    U32 tab[256];
+    U32 tab[8][256];
     U32 crc;
 
     CRC()
     {
         for (int i=0; i<256; ++i)
         {
-            U32 r=i;
+            U32 x=i;
             for (int j=0; j<8; ++j)
-                r=(r>>1)^(0xEDB88320&-int(r&1));
-            tab[i]=r;
+                x=(x>>1)^(0xEDB88320&-int(x&1));
+            tab[0][i]=x;
         }
-        crc=U32(-1);
+        for (int i=0; i<256; ++i)
+        {
+            tab[1][i]=(tab[0][i]>>8)^tab[0][tab[0][i]&255];
+            tab[2][i]=(tab[1][i]>>8)^tab[0][tab[1][i]&255];
+            tab[3][i]=(tab[2][i]>>8)^tab[0][tab[2][i]&255];
+            tab[4][i]=(tab[3][i]>>8)^tab[0][tab[3][i]&255];
+            tab[5][i]=(tab[4][i]>>8)^tab[0][tab[4][i]&255];
+            tab[6][i]=(tab[5][i]>>8)^tab[0][tab[5][i]&255];
+            tab[7][i]=(tab[6][i]>>8)^tab[0][tab[6][i]&255];
+        }
+        crc=0xFFFFFFFF;
     }
 
     U32 operator()() const
     {
-        return crc^U32(-1);
+        return crc^0xFFFFFFFF;
     }
 
-    void Update(int c)
+    void Update(U8* s, int n)
     {
-        crc=(crc>>8)^tab[(crc^c)&255];
-    }
-
-    void Update(U8* buf, int n)
-    {
-        for (int i=0; i<n; ++i)
-            crc=(crc>>8)^tab[(crc^buf[i])&255];
+        U32 x=crc;
+        while (n>=8)
+        {
+            x^=*reinterpret_cast<const U32*>(s);
+            const U32 t=*reinterpret_cast<const U32*>(s+4);
+            x=tab[0][t>>24]
+              ^tab[1][(t>>16)&255]
+              ^tab[2][(t>>8)&255]
+              ^tab[3][t&255]
+              ^tab[4][x>>24]
+              ^tab[5][(x>>16)&255]
+              ^tab[6][(x>>8)&255]
+              ^tab[7][x&255];
+            s+=8;
+            n-=8;
+        }
+        while (n--)
+            x=(x>>8)^tab[0][(x^*s++)&255];
+        crc=x;
     }
 } crc;
 
 template<typename T>
 inline T* MemAlloc(size_t n)
 {
-    T* p=(T*)malloc(n*sizeof(T));
+    T* p=reinterpret_cast<T*>(malloc(n*sizeof(T)));
     if (!p)
     {
         perror("Malloc() failed");
@@ -336,29 +359,14 @@ inline T* MemAlloc(size_t n)
     return p;
 }
 
-void Compress(int level)
+void Compress(int bsize)
 {
-    const int tab[10]=
-    {
-        0,
-        1<<20,      // -1 - 1 MB
-        1<<22,      // -2 - 4 MB
-        1<<23,      // -3 - 8 MB
-        0x00FFFFFF, // -4 - ~16 MB (Default)
-        1<<25,      // -5 - 32 MB
-        1<<26,      // -6 - 64 MB
-        1<<27,      // -7 - 128 MB
-        1<<28,      // -8 - 256 MB
-        0x7FFFFFFF, // -9 - ~2 GB
-    };
-    int bsize=tab[level]; // Block size
-
-    if (_fseeki64(in, 0, SEEK_END))
+    if (fseeko64(in, 0, SEEK_END))
     {
         perror("Fseek() failed");
         exit(1);
     }
-    const S64 flen=_ftelli64(in);
+    const S64 flen=ftello64(in);
     if (flen<0)
     {
         perror("Ftell() failed");
@@ -377,10 +385,10 @@ void Compress(int level)
     {
         crc.Update(buf, n);
 
-        const int idx=libsais_bwt(buf, buf, ptr, n);
+        const int idx=libsais_bwt(buf, buf, ptr, n, 0);
         if (idx<1)
         {
-            fprintf(stderr, "BWT() failed: idx = %d\n", idx);
+            perror("Libsais_bwt() failed");
             exit(1);
         }
 
@@ -390,7 +398,7 @@ void Compress(int level)
         for (int i=0; i<n; ++i)
             cm.Put(buf[i]);
 
-        fprintf(stderr, "%lld -> %lld\r", _ftelli64(in), _ftelli64(out));
+        fprintf(stderr, "%lld -> %lld\r", ftello64(in), ftello64(out));
     }
 
     cm.Put32(0); // EOF
@@ -407,8 +415,8 @@ void Decompress()
     int cnt[257];
 
     int bsize=0;
-    U8* buf=nullptr;
-    U32* ptr=nullptr;
+    U8* buf=NULL;
+    int* ptr=NULL;
 
     cm.Init();
 
@@ -417,9 +425,9 @@ void Decompress()
     {
         if (!bsize)
         {
-            if ((bsize=n)>=(1<<24)) // 5*N
-                buf=MemAlloc<U8>(bsize);
-            ptr=MemAlloc<U32>(bsize);
+            bsize=n;
+            buf=MemAlloc<U8>(bsize);
+            ptr=MemAlloc<int>(bsize);
         }
 
         const int idx=cm.Get32();
@@ -431,52 +439,39 @@ void Decompress()
 
         // Inverse BW-transform
 
-        if (n>=(1<<24)) // 5*N
+        memset(cnt, 0, sizeof(cnt));
+        for (int i=0; i<n; ++i)
+            ++cnt[(buf[i]=cm.Get())+1];
+        for (int i=1; i<256; ++i)
+            cnt[i]+=cnt[i-1];
+
+        for (int i=0; i<n; ++i)
+            ptr[cnt[buf[i]]++]=i-(i<idx);
+
+        int p=idx-1;
+        for (int i=0; i<n; ++i)
         {
-            memset(cnt, 0, sizeof(cnt));
-            for (int i=0; i<n; ++i)
-                ++cnt[(buf[i]=cm.Get())+1];
-            for (int i=1; i<256; ++i)
-                cnt[i]+=cnt[i-1];
-
-            for (int i=0; i<idx; ++i)
-                ptr[cnt[buf[i]]++]=i;
-            for (int i=idx+1; i<=n; ++i)
-                ptr[cnt[buf[i-1]]++]=i;
-
-            int p=idx;
-            for (int i=0; i<n; ++i)
+            int c=0;
+            int half=127;
+            for(int j=0; j<8; ++j)
             {
-                p=ptr[p-1];
-                const int c=buf[p-(p>=idx)];
-                crc.Update(c);
-                putc(c, out);
+                if (cnt[c+half]<=p)
+                    c+=half+1;
+                half>>=1;
             }
-        }
-        else // 4*N
-        {
-            memset(cnt, 0, sizeof(cnt));
-            for (int i=0; i<n; ++i)
-                ++cnt[(ptr[i]=cm.Get())+1];
-            for (int i=1; i<256; ++i)
-                cnt[i]+=cnt[i-1];
-
-            for (int i=0; i<idx; ++i)
-                ptr[cnt[ptr[i]&255]++]|=i<<8;
-            for (int i=idx+1; i<=n; ++i)
-                ptr[cnt[ptr[i-1]&255]++]|=i<<8;
-
-            int p=idx;
-            for (int i=0; i<n; ++i)
-            {
-                p=ptr[p-1]>>8;
-                const int c=ptr[p-(p>=idx)];
-                crc.Update(c);
-                putc(c, out);
-            }
+            buf[i]=c;
+            p=ptr[p];
         }
 
-        fprintf(stderr, "%lld -> %lld\r", _ftelli64(in), _ftelli64(out));
+        crc.Update(buf, n);
+
+        if (fwrite(buf, 1, n, out)!=n)
+        {
+            perror("Fwrite() failed");
+            exit(1);
+        }
+
+        fprintf(stderr, "%lld -> %lld\r", ftello64(in), ftello64(out));
     }
 
     if (cm.Get32()!=crc())
@@ -485,8 +480,7 @@ void Decompress()
         exit(1);
     }
 
-    if (buf)
-        free(buf);
+    free(buf);
     free(ptr);
 }
 
@@ -494,7 +488,7 @@ int main(int argc, char** argv)
 {
     const clock_t start=clock();
 
-    int level=4;
+    int bsize=1<<24; // 16 MB
     int decompress=0;
     int overwrite=0;
 
@@ -504,6 +498,7 @@ int main(int argc, char** argv)
         {
             switch (argv[1][i])
             {
+            case '0':
             case '1':
             case '2':
             case '3':
@@ -513,7 +508,14 @@ int main(int argc, char** argv)
             case '7':
             case '8':
             case '9':
-                level=argv[1][i]-'0';
+                break; // Skip
+            case 'b':
+                bsize=atoi(&argv[1][i+1])<<20;
+                if (bsize<1)
+                {
+                    fprintf(stderr, "Block size is out of range\n");
+                    exit(1);
+                }
                 break;
             case 'd':
                 decompress=1;
@@ -526,7 +528,6 @@ int main(int argc, char** argv)
                 exit(1);
             }
         }
-
         --argc;
         ++argv;
     }
@@ -534,15 +535,15 @@ int main(int argc, char** argv)
     if (argc<2)
     {
         fprintf(stderr,
-                "BCM - A BWT-based file compressor, v1.60\n"
+                "BCM - A BWT-based file compressor, v1.65\n"
                 "Copyright (C) 2008-2021 Ilya Muravyov\n"
                 "\n"
-                "Usage: BCM [options] infile [outfile]\n"
+                "Usage: bcm [options] infile [outfile]\n"
                 "\n"
                 "Options:\n"
-                "  -1 .. -9 Set block size to 1 MB .. 2 GB\n"
-                "  -d       Decompress\n"
-                "  -f       Force overwrite of output file\n");
+                "  -b# Set block size to # MB (default: 16)\n"
+                "  -d  Decompress\n"
+                "  -f  Force overwrite of output file\n");
         exit(1);
     }
 
@@ -591,10 +592,9 @@ int main(int argc, char** argv)
 
     if (decompress)
     {
-        if (getc(in)!=magic[0]
-                || getc(in)!=magic[1]
-                || getc(in)!=magic[2]
-                || getc(in)!=magic[3])
+        int id;
+        fread(&id, 1, sizeof(id), in);
+        if (id!=BCM_ID)
         {
             fprintf(stderr, "%s: Not in BCM format\n", argv[1]);
             exit(1);
@@ -620,25 +620,23 @@ int main(int argc, char** argv)
             exit(1);
         }
 
-        putc(magic[0], out);
-        putc(magic[1], out);
-        putc(magic[2], out);
-        putc(magic[3], out);
+        const int id=BCM_ID;
+        fwrite(&id, 1, sizeof(id), out);
 
         fprintf(stderr, "Compressing '%s':\n", argv[1]);
 
-        Compress(level);
+        Compress(bsize);
     }
 
-    fprintf(stderr, "%lld -> %lld in %1.1f sec\n",
-            _ftelli64(in), _ftelli64(out), double(clock()-start)/CLOCKS_PER_SEC);
+    fprintf(stderr, "%lld -> %lld in %.1f sec\n",
+            ftello64(in), ftello64(out), double(clock()-start)/CLOCKS_PER_SEC);
 
     fclose(in);
     fclose(out);
 
 #ifndef NO_UTIME
-    struct _stati64 sb;
-    if (_stati64(argv[1], &sb))
+    struct stat64 sb;
+    if (stat64(argv[1], &sb))
     {
         perror("Stat() failed");
         exit(1);
